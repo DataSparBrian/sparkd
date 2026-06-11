@@ -127,20 +127,45 @@ flowchart LR
 **Prerequisites**
 - Python **3.12+**
 - [`uv`](https://github.com/astral-sh/uv) (or `pip` if you prefer)
-- Node 20+ (only if you're rebuilding the SPA bundle)
+- Node **20+** and npm — required to build the web UI on first run (the compiled bundle isn't committed; see step 2)
 - An NVIDIA DGX Spark with [`eugr/spark-vllm-docker`](https://github.com/eugr/spark-vllm-docker) cloned at `~/spark-vllm-docker`
 - SSH access to that box (key-based, ideally via `ssh-agent`)
 
 **Install + run**
 
 ```bash
+# 1. Backend dependencies
 git clone https://github.com/mchenetz/sparkd
 cd sparkd
 uv sync
+
+# 2. Build the web UI (compiles to sparkd/static/, which the server mounts at /)
+cd frontend
+npm install
+npm run build
+cd ..
+
+# 3. Run the dashboard
 uv run sparkd serve
 ```
 
 Then open **http://localhost:8765**.
+
+> **Why the separate build step?** The compiled SPA bundle (`sparkd/static/`) is
+> git-ignored, so a fresh clone ships without it. If you skip step 2 the API still
+> runs — `http://localhost:8765/api/healthz` responds and the OpenAPI docs live at
+> `/docs` — but `/` returns `{"detail": "Not Found"}` because there's no UI bundle
+> to serve yet.
+
+**Working on the frontend?** Use the Vite dev server for hot reload instead of
+rebuilding each time. It proxies `/api` and `/ws` to the backend on port 8765:
+
+```bash
+# terminal 1 — backend
+uv run sparkd serve
+# terminal 2 — frontend with hot reload
+cd frontend && npm run dev
+```
 
 **First five minutes**
 
