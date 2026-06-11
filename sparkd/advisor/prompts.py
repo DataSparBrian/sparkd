@@ -48,12 +48,28 @@ def _caps_block(caps: BoxCapabilities) -> str:
 
 
 def _model_block(info: HFModelInfo) -> str:
+    # Missing facts (HF fetch failed / 404) default to 0 in HFModelInfo.
+    # Never render those as literal values — "Parameters: 0.0 B" invites
+    # the model to either take it at face value or silently guess. Mark
+    # them unknown and demand the assumption be surfaced in `rationale`.
+    params = (
+        f"{info.parameters_b} B"
+        if info.parameters_b
+        else "unknown — do NOT guess a size; state the assumption you "
+        "make in `rationale`"
+    )
+    ctx = (
+        str(info.context_length)
+        if info.context_length
+        else "unknown — choose a conservative --max-model-len and flag "
+        "it in `rationale`"
+    )
     return (
         f"Hugging Face model facts:\n"
         f"- ID: {info.id}\n"
         f"- Architecture: {info.architecture or 'unknown'}\n"
-        f"- Parameters: {info.parameters_b} B\n"
-        f"- Context length: {info.context_length}\n"
+        f"- Parameters: {params}\n"
+        f"- Context length: {ctx}\n"
         f"- Supported dtypes: {', '.join(info.supported_dtypes) or 'unknown'}\n"
         f"- License: {info.license or 'unknown'}\n"
         f"- {render_tool_call_block(info.id)}\n"

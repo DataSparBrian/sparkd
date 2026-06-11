@@ -140,6 +140,25 @@ def test_recipe_prompt_embeds_no_tool_call_for_base_model():
     assert "Do NOT set" in p
 
 
+def test_recipe_prompt_marks_missing_model_facts_unknown():
+    """When the HF fetch failed (404/minimal info), parameters_b and
+    context_length default to 0. Rendering those literally ('Parameters:
+    0.0 B') invites the model to take them at face value or guess
+    silently — mark them unknown and demand assumptions in rationale."""
+    minimal = HFModelInfo(id="org/unfetched-model")
+    p = build_recipe_prompt(minimal, _caps())
+    assert "0.0 B" not in p
+    assert "Context length: 0\n" not in p
+    assert p.count("unknown") >= 2
+    assert "rationale" in p
+
+
+def test_recipe_prompt_renders_known_facts_verbatim():
+    """Real facts keep rendering as values, not 'unknown'."""
+    p = build_recipe_prompt(_info(), _caps())
+    assert "unknown — do NOT guess" not in p
+
+
 def test_optimize_prompt_unknown_family_says_preserve():
     """Regression for the Nemotron-3 incident: when the family isn't in
     the parser table, the optimize prompt must instruct the advisor to
