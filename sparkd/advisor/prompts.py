@@ -87,23 +87,32 @@ def _cluster_block(cluster: dict) -> str:
     lines.append(f"- Aggregate VRAM: {cluster.get('total_vram_gb', 0)} GB")
     lines.append("")
     lines.append(
-        f"PARALLELISM REQUIREMENT (binding): "
-        f"--tensor-parallel-size × --pipeline-parallel-size MUST equal "
-        f"the cluster's total GPU count, which is **{total_gpus}** "
-        f"(= {n_nodes} nodes × {gpus_per_node} GPU/node). "
-        "Anything less than total_gpus leaves GPUs idle and Ray will "
-        "either reject the placement or refuse to schedule workers; "
-        "anything more is unsatisfiable."
+        f"PARALLELISM CONSTRAINTS: --tensor-parallel-size × "
+        f"--pipeline-parallel-size must not exceed the cluster's total "
+        f"GPU count of **{total_gpus}** (= {n_nodes} nodes × "
+        f"{gpus_per_node} GPU/node), and --tensor-parallel-size must "
+        "evenly divide the model's attention-head count. Default to "
+        f"using ALL GPUs (tp × pp = {total_gpus}) — this cluster exists "
+        "to serve this model, and leaving GPUs idle is almost always a "
+        "mistake. Sizing below total is valid only when a real "
+        "constraint forces it (head count not divisible by the GPU "
+        "count, MoE expert layout, per-stage memory shape) — if you do, "
+        "say why in `rationale`."
     )
     lines.append("")
     lines.append(
-        f"PREFERRED LAYOUT: tp = {total_gpus}, pp = 1 — distribute "
-        f"the model's tensor shards across all {total_gpus} GPUs in one "
-        "pipeline stage. The Spark fleet has IB/RoCE between nodes which "
-        "supports cross-node tensor-parallel comfortably. Only fall back "
-        f"to pp = {n_nodes} (and tp = {gpus_per_node}) when a model's "
-        "intermediate-state size genuinely requires the extra "
-        "memory-per-stage budget."
+        f"LAYOUT TRADE-OFF: every node here has {gpus_per_node} GPU(s), "
+        "so tensor-parallel groups larger than one node communicate "
+        f"over the inter-node link. tp = {total_gpus}, pp = 1 gives "
+        "each stage the full aggregate VRAM and is what NVIDIA's Spark "
+        "playbooks use at small node counts, but all-reduce traffic "
+        f"crosses the network every layer. pp = {n_nodes} with tp = "
+        f"{gpus_per_node} keeps tensor traffic on-node and only sends "
+        "activations between stages, at the cost of pipeline bubbles. "
+        "Prefer cross-node tp for 2-node clusters and latency-sensitive "
+        "serving; weigh pipeline stages as node count grows or when "
+        "the model is interconnect-bound. State the choice and why in "
+        "`rationale`."
     )
     lines.append("")
     lines.append(
@@ -186,11 +195,12 @@ def build_optimize_prompt(
         total = cluster.get("total_gpus", 0)
         parts.append(
             f"REMINDER: target is a {len(cluster.get('nodes') or [])}-node "
-            f"cluster with {total} total GPUs. The product of "
-            f"--tensor-parallel-size and --pipeline-parallel-size in the "
-            f"revised recipe MUST equal {total}. If the existing recipe "
-            f"is undersized for the cluster (e.g. tp=1 against {total} "
-            f"GPUs), upsize it; if oversized, downsize."
+            f"cluster with {total} total GPUs. Size the revised recipe "
+            f"for the cluster: tp × pp should use all {total} GPUs "
+            "unless a divisibility or memory constraint forces fewer "
+            "(explain in `rationale`). If the existing recipe is sized "
+            f"for a single box (e.g. tp=1 against {total} GPUs), upsize "
+            f"it; if tp × pp exceeds {total}, downsize."
         )
     return "\n".join(parts) + "\n"
 

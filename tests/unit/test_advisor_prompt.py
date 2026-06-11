@@ -65,18 +65,26 @@ def _cluster(n_nodes: int, gpus_per_node: int = 1, vram_gb: int = 128) -> dict:
     }
 
 
-def test_recipe_prompt_with_cluster_pins_tp_pp_to_total_gpus():
-    """When a cluster context is provided, the prompt must explicitly
-    tell the model that --tensor-parallel-size × --pipeline-parallel-size
-    has to equal the cluster's total GPU count. Without this the AI keeps
-    sizing recipes for a single node."""
+def test_recipe_prompt_with_cluster_states_accurate_constraints():
+    """When a cluster context is provided, the prompt sizes for the whole
+    cluster (the original failure mode was single-node-sized advice) but
+    states the constraints accurately: tp × pp bounded by total GPUs,
+    tp divisibility by attention heads, use-all-GPUs as a default rather
+    than a false 'Ray will reject' mandate, and both layouts presented
+    as a trade-off."""
     p = build_recipe_prompt(_info(), _caps(), cluster=_cluster(n_nodes=3))
-    # Hard binding stated.
-    assert "tensor-parallel-size × --pipeline-parallel-size MUST equal" in p
+    assert "PARALLELISM CONSTRAINTS" in p
     # The actual number is in the prompt.
     assert "**3**" in p
-    # Preferred layout (tp = total_gpus, pp = 1) is suggested.
+    # Strong default — all GPUs.
+    assert "tp × pp = 3" in p
+    # Real constraint mentioned, false mandate gone.
+    assert "attention-head count" in p
+    assert "MUST equal" not in p
+    # Both layouts as a trade-off, not a single PREFERRED edict.
+    assert "LAYOUT TRADE-OFF" in p
     assert "tp = 3, pp = 1" in p
+    assert "pipeline bubbles" in p
 
 
 def test_optimize_prompt_with_cluster_includes_topology_and_tp_constraint():
@@ -89,11 +97,10 @@ def test_optimize_prompt_with_cluster_includes_topology_and_tp_constraint():
     )
     assert "Multi-node cluster topology" in p
     assert "Total GPUs across cluster: 2" in p
-    # Reminder line tells Claude to upsize/downsize against total_gpus.
-    assert (
-        "tensor-parallel-size and --pipeline-parallel-size in the "
-        "revised recipe MUST equal 2"
-    ) in p
+    # Reminder line tells Claude to size for the cluster, with an out
+    # for genuine constraints.
+    assert "tp × pp should use all 2 GPUs" in p
+    assert "upsize" in p
 
 
 def test_optimize_prompt_without_cluster_unchanged_behavior():
