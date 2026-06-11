@@ -221,10 +221,22 @@ def build_optimize_prompt(
     return "\n".join(parts) + "\n"
 
 
+def _fence_for(text: str) -> str:
+    """A code fence guaranteed to survive `text` embedded inside it: one
+    backtick longer than the longest backtick run in the text (minimum
+    the standard three). Error logs can legitimately contain ``` —
+    Python tracebacks quoting markdown, vLLM echoing chat templates —
+    and a broken fence makes everything after it leak out of the code
+    block and look like prompt text."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def build_mod_prompt(*, error_log: str, model_id: str) -> str:
+    fence = _fence_for(error_log)
     return (
         f"Model: {model_id}\n\n"
-        f"Error log / failure mode:\n```\n{error_log}\n```\n\n"
+        f"Error log / failure mode:\n{fence}\n{error_log}\n{fence}\n\n"
         "Propose a vLLM mod (a small patch + optional shell hook) that fixes this. "
         "Return a ModDraft as JSON with keys: `name`, `target_models` (list), "
         "`files` (dict of relative-path → file-contents string; typically "
@@ -237,10 +249,26 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
 def _extract_json(text: str) -> dict:
-    m = _FENCE.search(text)
-    if not m:
-        return json.loads(text)
-    return json.loads(m.group(1))
+    """Pull the answer JSON out of a model response.
+
+    The model is asked for a single fenced ```json block, but real
+    responses sometimes carry other fenced blocks too — a shell snippet
+    in the preamble, an illustrative example before the final answer.
+    The old behavior took the FIRST fenced block, which made any such
+    block break parsing. Try every fenced block and keep the LAST one
+    that parses to a JSON object (the final block is the answer by
+    convention); fall back to treating the whole text as bare JSON."""
+    parsed: dict | None = None
+    for block in _FENCE.findall(text):
+        try:
+            obj = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            parsed = obj
+    if parsed is not None:
+        return parsed
+    return json.loads(text)
 
 
 def parse_recipe_draft(text: str) -> RecipeDraft:

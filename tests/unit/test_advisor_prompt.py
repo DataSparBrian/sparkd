@@ -198,6 +198,58 @@ def test_mod_prompt_carries_error_log():
     assert "ImportError: foo" in p
 
 
+def test_mod_prompt_fences_logs_containing_backticks():
+    """An error log that itself contains ``` must not break the code
+    fence — otherwise the tail of the log leaks out of the block and
+    reads as prompt text."""
+    log = "Traceback...\n```json\n{'oops': 1}\n```\nValueError: bad template"
+    p = build_mod_prompt(error_log=log, model_id="x")
+    # The log is embedded intact.
+    assert log in p
+    # The wrapping fence is longer than any backtick run inside the log,
+    # and both ends use it.
+    assert p.count("````") >= 2
+
+
+def test_parse_recipe_draft_ignores_non_json_blocks_before_answer():
+    """A fenced shell snippet in the preamble must not break parsing —
+    the old first-block behavior fed `ray start ...` to json.loads."""
+    text = (
+        "Start the cluster like this:\n"
+        "```\n"
+        "ray start --head\n"
+        "```\n"
+        "And the recipe:\n"
+        "```json\n"
+        '{"name":"r","model":"m","args":{"--tp":"2"},'
+        '"env":{},"description":"d","rationale":"r"}\n'
+        "```\n"
+    )
+    draft = parse_recipe_draft(text)
+    assert draft.name == "r"
+    assert draft.args["--tp"] == "2"
+
+
+def test_parse_recipe_draft_takes_last_json_block():
+    """When the response shows a 'before' example and then the final
+    answer, the LAST parseable JSON object wins."""
+    text = (
+        "Current config:\n"
+        "```json\n"
+        '{"name":"r","model":"m","args":{"--tp":"1"},'
+        '"env":{},"description":"old","rationale":"old"}\n'
+        "```\n"
+        "Revised:\n"
+        "```json\n"
+        '{"name":"r","model":"m","args":{"--tp":"2"},'
+        '"env":{},"description":"new","rationale":"new"}\n'
+        "```\n"
+    )
+    draft = parse_recipe_draft(text)
+    assert draft.args["--tp"] == "2"
+    assert draft.description == "new"
+
+
 def test_parse_recipe_draft_from_json_block():
     text = (
         "Here is the recipe.\n"
