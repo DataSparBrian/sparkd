@@ -129,8 +129,26 @@ def test_recipe_prompt_embeds_no_tool_call_for_base_model():
         context_length=32768,
     )
     p = build_recipe_prompt(base_info, _caps())
-    assert "Tool calling: NOT detected" in p
+    assert "Tool calling: NOT SUPPORTED" in p
     assert "Do NOT set" in p
+
+
+def test_optimize_prompt_unknown_family_says_preserve():
+    """Regression for the Nemotron-3 incident: when the family isn't in
+    the parser table, the optimize prompt must instruct the advisor to
+    preserve existing tool-call args, not remove them."""
+    r = RecipeSpec(
+        name="r",
+        model="some-org/random-experimental-model",
+        args={
+            "--tool-call-parser": "custom",
+            "--enable-auto-tool-choice": "true",
+        },
+    )
+    p = build_optimize_prompt(r, _caps(), goals=["throughput"])
+    assert "Tool calling: UNKNOWN" in p
+    assert "KEEP" in p
+    assert "if UNKNOWN, preserve" in p
 
 
 def test_optimize_prompt_embeds_tool_call_fact():

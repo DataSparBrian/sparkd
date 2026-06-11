@@ -176,9 +176,11 @@ def build_optimize_prompt(
         "Return a revised RecipeDraft (same JSON shape as recipe creation). "
         "Keep the same `name` and `model`. Explain each change in "
         "`rationale`. Reconcile the recipe's tool-call args with the "
-        "Model fact above — if support is detected and args don't have "
-        "both --tool-call-parser and --enable-auto-tool-choice, add "
-        "them; if NOT detected, remove them."
+        "Model fact above — if SUPPORTED and args don't have both "
+        "--tool-call-parser and --enable-auto-tool-choice, add them; if "
+        "NOT SUPPORTED, remove them; if UNKNOWN, preserve the recipe's "
+        "existing tool-call args exactly as they are (never remove them "
+        "on a heuristic miss)."
     )
     if cluster:
         total = cluster.get("total_gpus", 0)
