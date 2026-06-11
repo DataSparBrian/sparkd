@@ -423,6 +423,50 @@ async def test_sync_emits_enable_auto_tool_choice_as_bare_flag(svc):
     assert "--enable-auto-tool-choice true" not in blob
 
 
+async def test_sync_merges_curated_command_flags_into_regenerated_command(svc):
+    """A recipe can carry both a hand-curated `command` and an `args:`
+    block that drifted apart — e.g. tool-call flags present only in the
+    command (the Nemotron-3-Super case). Regenerating the command from
+    args must preserve command-only flags instead of silently dropping
+    them; args wins on conflicts; `{placeholder}` values survive for
+    upstream's defaults substitution."""
+    rs, box_svc, fake, _ = svc
+    bs = await box_svc.create(BoxCreate(name="b", host="h", user="u"))
+    raw = (
+        "name: drifted\n"
+        "model: nvidia/some-model\n"
+        "container: vllm-node\n"
+        "defaults:\n"
+        "  port: 8000\n"
+        "  tensor_parallel: 2\n"
+        "command: |\n"
+        "  vllm serve nvidia/some-model \\\n"
+        "    --port {port} \\\n"
+        "    --enable-auto-tool-choice \\\n"
+        "    --tool-call-parser qwen3_coder \\\n"
+        "    --tensor-parallel-size {tensor_parallel} \\\n"
+        "    --distributed-executor-backend ray\n"
+        "args:\n"
+        "  --port: '9999'\n"
+        "  --max-model-len: '131072'\n"
+    )
+    rs.library.save_recipe_raw("drifted", raw)
+    await rs.sync("drifted", bs.id)
+    blob = "\n".join(fake.received)
+    # Command-only flags survive the regeneration.
+    assert "--tool-call-parser qwen3_coder" in blob
+    assert "--enable-auto-tool-choice" in blob
+    assert "--enable-auto-tool-choice true" not in blob
+    assert "--distributed-executor-backend ray" in blob
+    # Placeholder value kept verbatim for defaults substitution.
+    assert "--tensor-parallel-size {tensor_parallel}" in blob
+    # args wins on conflict: the curated {port} placeholder is replaced.
+    assert "--port 9999" in blob
+    assert "--port {port}" not in blob
+    # args-only flags still present.
+    assert "--max-model-len 131072" in blob
+
+
 async def test_sync_preserves_command_when_args_empty(svc):
     """Upstream-format recipes (hand-curated commands, empty `args:`) must
     pass through unchanged. Only the args-driven path regenerates."""

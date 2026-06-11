@@ -8,6 +8,7 @@ import yaml
 from sparkd import paths
 from sparkd.errors import NotFoundError, ValidationError
 from sparkd.schemas.recipe import RecipeSpec
+from sparkd.services.cli_flags import BOOL_FLAG_ARGS, canonical_flag
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-.]{0,63}$")
 
@@ -188,8 +189,13 @@ def _extract_args_from_command(command: str, defaults: dict | None) -> dict[str,
                 args[t] = tokens[i + 1]
                 i += 2
             else:
-                # boolean / flag with no value
-                args[t] = ""
+                # Bare flag. Known boolean flags get "true" so downstream
+                # consumers (validate()'s _is_true, the form view) read
+                # them as enabled — "" parses as false and produced
+                # spurious "parser without --enable-auto-tool-choice"
+                # warnings. Unknown bare flags keep "" (renders back as
+                # a bare flag either way).
+                args[t] = "true" if canonical_flag(t) in BOOL_FLAG_ARGS else ""
                 i += 1
         else:
             i += 1
@@ -197,16 +203,31 @@ def _extract_args_from_command(command: str, defaults: dict | None) -> dict[str,
 
 
 def _maybe_inject_args(data: dict) -> dict:
-    """If the YAML body has no `args:` (typical of upstream-format recipes),
-    derive args from `command:` + `defaults:` so the form view isn't empty."""
-    if data.get("args"):
-        return data
+    """Make the parsed args view reflect the full effective config.
+
+    Upstream-format recipes carry flags in a templated `command:`; sparkd
+    consumers (the form view, the AI advisor, validate()) only see `args`.
+    With no `args:` block, derive it wholesale from the command. With a
+    non-empty `args:` block that drifted from the curated command (the
+    Nemotron-3 case: tool-call flags only in `command`), merge the
+    command-only flags in — existing args win per-key, compared via
+    canonical flag names so `-tp` and `--tensor-parallel-size` don't
+    duplicate. Without this merge the advisor optimizes against a partial
+    view and can't know flags the command actually sets."""
     derived = _extract_args_from_command(
         data.get("command", "") or "", data.get("defaults") or {}
     )
-    if derived:
+    if not derived:
+        return data
+    existing = data.get("args")
+    if not existing or not isinstance(existing, dict):
         return {**data, "args": derived}
-    return data
+    merged = dict(existing)
+    existing_canon = {canonical_flag(str(k)) for k in existing}
+    for k, v in derived.items():
+        if canonical_flag(k) not in existing_canon:
+            merged[canonical_flag(k)] = v
+    return {**data, "args": merged}
 
 
 def _yaml_inline(value: object) -> str:

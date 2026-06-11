@@ -48,12 +48,28 @@ def _caps_block(caps: BoxCapabilities) -> str:
 
 
 def _model_block(info: HFModelInfo) -> str:
+    # Missing facts (HF fetch failed / 404) default to 0 in HFModelInfo.
+    # Never render those as literal values — "Parameters: 0.0 B" invites
+    # the model to either take it at face value or silently guess. Mark
+    # them unknown and demand the assumption be surfaced in `rationale`.
+    params = (
+        f"{info.parameters_b} B"
+        if info.parameters_b
+        else "unknown — do NOT guess a size; state the assumption you "
+        "make in `rationale`"
+    )
+    ctx = (
+        str(info.context_length)
+        if info.context_length
+        else "unknown — choose a conservative --max-model-len and flag "
+        "it in `rationale`"
+    )
     return (
         f"Hugging Face model facts:\n"
         f"- ID: {info.id}\n"
         f"- Architecture: {info.architecture or 'unknown'}\n"
-        f"- Parameters: {info.parameters_b} B\n"
-        f"- Context length: {info.context_length}\n"
+        f"- Parameters: {params}\n"
+        f"- Context length: {ctx}\n"
         f"- Supported dtypes: {', '.join(info.supported_dtypes) or 'unknown'}\n"
         f"- License: {info.license or 'unknown'}\n"
         f"- {render_tool_call_block(info.id)}\n"
@@ -87,23 +103,32 @@ def _cluster_block(cluster: dict) -> str:
     lines.append(f"- Aggregate VRAM: {cluster.get('total_vram_gb', 0)} GB")
     lines.append("")
     lines.append(
-        f"PARALLELISM REQUIREMENT (binding): "
-        f"--tensor-parallel-size × --pipeline-parallel-size MUST equal "
-        f"the cluster's total GPU count, which is **{total_gpus}** "
-        f"(= {n_nodes} nodes × {gpus_per_node} GPU/node). "
-        "Anything less than total_gpus leaves GPUs idle and Ray will "
-        "either reject the placement or refuse to schedule workers; "
-        "anything more is unsatisfiable."
+        f"PARALLELISM CONSTRAINTS: --tensor-parallel-size × "
+        f"--pipeline-parallel-size must not exceed the cluster's total "
+        f"GPU count of **{total_gpus}** (= {n_nodes} nodes × "
+        f"{gpus_per_node} GPU/node), and --tensor-parallel-size must "
+        "evenly divide the model's attention-head count. Default to "
+        f"using ALL GPUs (tp × pp = {total_gpus}) — this cluster exists "
+        "to serve this model, and leaving GPUs idle is almost always a "
+        "mistake. Sizing below total is valid only when a real "
+        "constraint forces it (head count not divisible by the GPU "
+        "count, MoE expert layout, per-stage memory shape) — if you do, "
+        "say why in `rationale`."
     )
     lines.append("")
     lines.append(
-        f"PREFERRED LAYOUT: tp = {total_gpus}, pp = 1 — distribute "
-        f"the model's tensor shards across all {total_gpus} GPUs in one "
-        "pipeline stage. The Spark fleet has IB/RoCE between nodes which "
-        "supports cross-node tensor-parallel comfortably. Only fall back "
-        f"to pp = {n_nodes} (and tp = {gpus_per_node}) when a model's "
-        "intermediate-state size genuinely requires the extra "
-        "memory-per-stage budget."
+        f"LAYOUT TRADE-OFF: every node here has {gpus_per_node} GPU(s), "
+        "so tensor-parallel groups larger than one node communicate "
+        f"over the inter-node link. tp = {total_gpus}, pp = 1 gives "
+        "each stage the full aggregate VRAM and is what NVIDIA's Spark "
+        "playbooks use at small node counts, but all-reduce traffic "
+        f"crosses the network every layer. pp = {n_nodes} with tp = "
+        f"{gpus_per_node} keeps tensor traffic on-node and only sends "
+        "activations between stages, at the cost of pipeline bubbles. "
+        "Prefer cross-node tp for 2-node clusters and latency-sensitive "
+        "serving; weigh pipeline stages as node count grows or when "
+        "the model is interconnect-bound. State the choice and why in "
+        "`rationale`."
     )
     lines.append("")
     lines.append(
@@ -176,27 +201,42 @@ def build_optimize_prompt(
         "Return a revised RecipeDraft (same JSON shape as recipe creation). "
         "Keep the same `name` and `model`. Explain each change in "
         "`rationale`. Reconcile the recipe's tool-call args with the "
-        "Model fact above — if support is detected and args don't have "
-        "both --tool-call-parser and --enable-auto-tool-choice, add "
-        "them; if NOT detected, remove them."
+        "Model fact above — if SUPPORTED and args don't have both "
+        "--tool-call-parser and --enable-auto-tool-choice, add them; if "
+        "NOT SUPPORTED, remove them; if UNKNOWN, preserve the recipe's "
+        "existing tool-call args exactly as they are (never remove them "
+        "on a heuristic miss)."
     )
     if cluster:
         total = cluster.get("total_gpus", 0)
         parts.append(
             f"REMINDER: target is a {len(cluster.get('nodes') or [])}-node "
-            f"cluster with {total} total GPUs. The product of "
-            f"--tensor-parallel-size and --pipeline-parallel-size in the "
-            f"revised recipe MUST equal {total}. If the existing recipe "
-            f"is undersized for the cluster (e.g. tp=1 against {total} "
-            f"GPUs), upsize it; if oversized, downsize."
+            f"cluster with {total} total GPUs. Size the revised recipe "
+            f"for the cluster: tp × pp should use all {total} GPUs "
+            "unless a divisibility or memory constraint forces fewer "
+            "(explain in `rationale`). If the existing recipe is sized "
+            f"for a single box (e.g. tp=1 against {total} GPUs), upsize "
+            f"it; if tp × pp exceeds {total}, downsize."
         )
     return "\n".join(parts) + "\n"
 
 
+def _fence_for(text: str) -> str:
+    """A code fence guaranteed to survive `text` embedded inside it: one
+    backtick longer than the longest backtick run in the text (minimum
+    the standard three). Error logs can legitimately contain ``` —
+    Python tracebacks quoting markdown, vLLM echoing chat templates —
+    and a broken fence makes everything after it leak out of the code
+    block and look like prompt text."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
 def build_mod_prompt(*, error_log: str, model_id: str) -> str:
+    fence = _fence_for(error_log)
     return (
         f"Model: {model_id}\n\n"
-        f"Error log / failure mode:\n```\n{error_log}\n```\n\n"
+        f"Error log / failure mode:\n{fence}\n{error_log}\n{fence}\n\n"
         "Propose a vLLM mod (a small patch + optional shell hook) that fixes this. "
         "Return a ModDraft as JSON with keys: `name`, `target_models` (list), "
         "`files` (dict of relative-path → file-contents string; typically "
@@ -209,10 +249,26 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
 def _extract_json(text: str) -> dict:
-    m = _FENCE.search(text)
-    if not m:
-        return json.loads(text)
-    return json.loads(m.group(1))
+    """Pull the answer JSON out of a model response.
+
+    The model is asked for a single fenced ```json block, but real
+    responses sometimes carry other fenced blocks too — a shell snippet
+    in the preamble, an illustrative example before the final answer.
+    The old behavior took the FIRST fenced block, which made any such
+    block break parsing. Try every fenced block and keep the LAST one
+    that parses to a JSON object (the final block is the answer by
+    convention); fall back to treating the whole text as bare JSON."""
+    parsed: dict | None = None
+    for block in _FENCE.findall(text):
+        try:
+            obj = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            parsed = obj
+    if parsed is not None:
+        return parsed
+    return json.loads(text)
 
 
 def parse_recipe_draft(text: str) -> RecipeDraft:

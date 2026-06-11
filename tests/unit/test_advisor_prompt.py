@@ -65,18 +65,26 @@ def _cluster(n_nodes: int, gpus_per_node: int = 1, vram_gb: int = 128) -> dict:
     }
 
 
-def test_recipe_prompt_with_cluster_pins_tp_pp_to_total_gpus():
-    """When a cluster context is provided, the prompt must explicitly
-    tell the model that --tensor-parallel-size × --pipeline-parallel-size
-    has to equal the cluster's total GPU count. Without this the AI keeps
-    sizing recipes for a single node."""
+def test_recipe_prompt_with_cluster_states_accurate_constraints():
+    """When a cluster context is provided, the prompt sizes for the whole
+    cluster (the original failure mode was single-node-sized advice) but
+    states the constraints accurately: tp × pp bounded by total GPUs,
+    tp divisibility by attention heads, use-all-GPUs as a default rather
+    than a false 'Ray will reject' mandate, and both layouts presented
+    as a trade-off."""
     p = build_recipe_prompt(_info(), _caps(), cluster=_cluster(n_nodes=3))
-    # Hard binding stated.
-    assert "tensor-parallel-size × --pipeline-parallel-size MUST equal" in p
+    assert "PARALLELISM CONSTRAINTS" in p
     # The actual number is in the prompt.
     assert "**3**" in p
-    # Preferred layout (tp = total_gpus, pp = 1) is suggested.
+    # Strong default — all GPUs.
+    assert "tp × pp = 3" in p
+    # Real constraint mentioned, false mandate gone.
+    assert "attention-head count" in p
+    assert "MUST equal" not in p
+    # Both layouts as a trade-off, not a single PREFERRED edict.
+    assert "LAYOUT TRADE-OFF" in p
     assert "tp = 3, pp = 1" in p
+    assert "pipeline bubbles" in p
 
 
 def test_optimize_prompt_with_cluster_includes_topology_and_tp_constraint():
@@ -89,11 +97,10 @@ def test_optimize_prompt_with_cluster_includes_topology_and_tp_constraint():
     )
     assert "Multi-node cluster topology" in p
     assert "Total GPUs across cluster: 2" in p
-    # Reminder line tells Claude to upsize/downsize against total_gpus.
-    assert (
-        "tensor-parallel-size and --pipeline-parallel-size in the "
-        "revised recipe MUST equal 2"
-    ) in p
+    # Reminder line tells Claude to size for the cluster, with an out
+    # for genuine constraints.
+    assert "tp × pp should use all 2 GPUs" in p
+    assert "upsize" in p
 
 
 def test_optimize_prompt_without_cluster_unchanged_behavior():
@@ -129,8 +136,45 @@ def test_recipe_prompt_embeds_no_tool_call_for_base_model():
         context_length=32768,
     )
     p = build_recipe_prompt(base_info, _caps())
-    assert "Tool calling: NOT detected" in p
+    assert "Tool calling: NOT SUPPORTED" in p
     assert "Do NOT set" in p
+
+
+def test_recipe_prompt_marks_missing_model_facts_unknown():
+    """When the HF fetch failed (404/minimal info), parameters_b and
+    context_length default to 0. Rendering those literally ('Parameters:
+    0.0 B') invites the model to take them at face value or guess
+    silently — mark them unknown and demand assumptions in rationale."""
+    minimal = HFModelInfo(id="org/unfetched-model")
+    p = build_recipe_prompt(minimal, _caps())
+    assert "0.0 B" not in p
+    assert "Context length: 0\n" not in p
+    assert p.count("unknown") >= 2
+    assert "rationale" in p
+
+
+def test_recipe_prompt_renders_known_facts_verbatim():
+    """Real facts keep rendering as values, not 'unknown'."""
+    p = build_recipe_prompt(_info(), _caps())
+    assert "unknown — do NOT guess" not in p
+
+
+def test_optimize_prompt_unknown_family_says_preserve():
+    """Regression for the Nemotron-3 incident: when the family isn't in
+    the parser table, the optimize prompt must instruct the advisor to
+    preserve existing tool-call args, not remove them."""
+    r = RecipeSpec(
+        name="r",
+        model="some-org/random-experimental-model",
+        args={
+            "--tool-call-parser": "custom",
+            "--enable-auto-tool-choice": "true",
+        },
+    )
+    p = build_optimize_prompt(r, _caps(), goals=["throughput"])
+    assert "Tool calling: UNKNOWN" in p
+    assert "KEEP" in p
+    assert "if UNKNOWN, preserve" in p
 
 
 def test_optimize_prompt_embeds_tool_call_fact():
@@ -152,6 +196,58 @@ def test_optimize_prompt_embeds_tool_call_fact():
 def test_mod_prompt_carries_error_log():
     p = build_mod_prompt(error_log="ImportError: foo", model_id="x")
     assert "ImportError: foo" in p
+
+
+def test_mod_prompt_fences_logs_containing_backticks():
+    """An error log that itself contains ``` must not break the code
+    fence — otherwise the tail of the log leaks out of the block and
+    reads as prompt text."""
+    log = "Traceback...\n```json\n{'oops': 1}\n```\nValueError: bad template"
+    p = build_mod_prompt(error_log=log, model_id="x")
+    # The log is embedded intact.
+    assert log in p
+    # The wrapping fence is longer than any backtick run inside the log,
+    # and both ends use it.
+    assert p.count("````") >= 2
+
+
+def test_parse_recipe_draft_ignores_non_json_blocks_before_answer():
+    """A fenced shell snippet in the preamble must not break parsing —
+    the old first-block behavior fed `ray start ...` to json.loads."""
+    text = (
+        "Start the cluster like this:\n"
+        "```\n"
+        "ray start --head\n"
+        "```\n"
+        "And the recipe:\n"
+        "```json\n"
+        '{"name":"r","model":"m","args":{"--tp":"2"},'
+        '"env":{},"description":"d","rationale":"r"}\n'
+        "```\n"
+    )
+    draft = parse_recipe_draft(text)
+    assert draft.name == "r"
+    assert draft.args["--tp"] == "2"
+
+
+def test_parse_recipe_draft_takes_last_json_block():
+    """When the response shows a 'before' example and then the final
+    answer, the LAST parseable JSON object wins."""
+    text = (
+        "Current config:\n"
+        "```json\n"
+        '{"name":"r","model":"m","args":{"--tp":"1"},'
+        '"env":{},"description":"old","rationale":"old"}\n'
+        "```\n"
+        "Revised:\n"
+        "```json\n"
+        '{"name":"r","model":"m","args":{"--tp":"2"},'
+        '"env":{},"description":"new","rationale":"new"}\n'
+        "```\n"
+    )
+    draft = parse_recipe_draft(text)
+    assert draft.args["--tp"] == "2"
+    assert draft.description == "new"
 
 
 def test_parse_recipe_draft_from_json_block():

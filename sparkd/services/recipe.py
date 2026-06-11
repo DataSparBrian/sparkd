@@ -6,6 +6,7 @@ from sparkd.db.engine import session_scope
 from sparkd.db.models import Box
 from sparkd.schemas.recipe import RecipeDiff, RecipeSpec
 from sparkd.services.box import BoxService
+from sparkd.services.cli_flags import BOOL_FLAG_ARGS, FLAG_ALIASES
 from sparkd.services.library import LibraryService
 from sparkd.ssh.pool import SSHPool
 
@@ -175,6 +176,22 @@ class RecipeService:
         args_dict = data.get("args") or {}
         top_model = data.get("model")
         if isinstance(args_dict, dict) and args_dict:
+            # A recipe can carry BOTH a hand-curated `command` and an
+            # `args:` block that have drifted apart — e.g. tool-call
+            # flags (`--enable-auto-tool-choice`, `--tool-call-parser`)
+            # present only in the curated command. Regenerating purely
+            # from args would silently drop those flags from the actual
+            # vllm invocation. Merge command-only flags into args first;
+            # args wins on conflicts. `{placeholder}` values from the
+            # curated command are kept verbatim — upstream's str.format
+            # against `defaults` resolves them on the box.
+            curated = data.get("command")
+            if isinstance(curated, str) and curated.strip():
+                merged = dict(args_dict)
+                for k, v in _parse_command_flags(curated).items():
+                    merged.setdefault(k, v)
+                args_dict = merged
+                data["args"] = merged
             data["command"] = _LiteralStr(_command_from_args(args_dict))
             # Ensure {model} resolves: defaults.model mirrors top-level.
             if isinstance(top_model, str) and top_model:
@@ -256,20 +273,40 @@ def _is_true(v: object) -> bool:
     return False
 
 
-# Args whose value is a flag-only boolean — emitting `--trust-remote-code true`
-# breaks vLLM (it reads "true" as a positional). For these, when the recipe's
-# args dict has the value "true"/"True"/"" we emit only the flag.
-_BOOL_FLAG_ARGS = frozenset(
-    {
-        "--trust-remote-code",
-        "--enforce-eager",
-        "--enable-prefix-caching",
-        "--enable-chunked-prefill",
-        "--enable-auto-tool-choice",
-        "--disable-log-stats",
-        "--disable-log-requests",
-    }
-)
+# Re-exported from cli_flags (shared with services.library, which this
+# module can't import from without a cycle).
+_BOOL_FLAG_ARGS = BOOL_FLAG_ARGS
+_FLAG_ALIASES = FLAG_ALIASES
+
+
+def _parse_command_flags(command: str) -> dict[str, str]:
+    """Extract `--flag [value]` pairs from a hand-curated command template.
+
+    Used by sync() to preserve flags that exist only in the curated
+    `command` when the command is regenerated from `args`. Handles
+    backslash line continuations, bare boolean flags (mapped to "true"
+    for known boolean args, "" otherwise — both render back as a bare
+    flag in _command_from_args), and the short aliases in _FLAG_ALIASES.
+    `{placeholder}` values are kept verbatim. Non-flag tokens (the
+    `vllm serve <model>` prefix) are skipped.
+    """
+    tokens = [t for t in command.replace("\\\n", " ").split() if t != "\\"]
+    flags: dict[str, str] = {}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        flag = _FLAG_ALIASES.get(tok, tok) if tok.startswith("-") else ""
+        if not flag.startswith("--"):
+            i += 1
+            continue
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if nxt is not None and not nxt.startswith("--") and nxt not in _FLAG_ALIASES:
+            flags[flag] = nxt
+            i += 2
+        else:
+            flags[flag] = "true" if flag in _BOOL_FLAG_ARGS else ""
+            i += 1
+    return flags
 
 
 def _command_from_args(args: dict) -> str:

@@ -7,7 +7,12 @@ from sparkd.db.models import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False is critical: sparkd runs migrations
+    # in-process during app startup (see db.engine.init_engine). With the
+    # default True, fileConfig() would disable the already-configured
+    # uvicorn loggers, silently swallowing "Application startup complete"
+    # and "Uvicorn running on ..." — making a healthy server look hung.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 target_metadata = Base.metadata
 
 

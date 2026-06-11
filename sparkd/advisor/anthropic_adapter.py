@@ -12,6 +12,7 @@ from sparkd.advisor.prompts import (
     build_optimize_prompt,
     build_recipe_prompt,
 )
+from sparkd.advisor.providers import DEFAULT_ANTHROPIC_MODEL
 from sparkd.schemas.advisor import AdvisorMessage
 from sparkd.schemas.box import BoxCapabilities
 from sparkd.schemas.hf import HFModelInfo
@@ -56,7 +57,7 @@ class AnthropicAdapter:
         self,
         api_key: str,
         *,
-        model: str = "claude-opus-4-7",
+        model: str = DEFAULT_ANTHROPIC_MODEL,
         max_tokens: int = 4096,
     ) -> None:
         self._client = AsyncAnthropic(api_key=api_key)
