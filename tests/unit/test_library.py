@@ -11,10 +11,18 @@ def lib(sparkd_home):
 
 
 def test_save_then_load_recipe(lib):
+    """Saved args round-trip. The loaded view also surfaces the flags from
+    the rendered command template (host/port/gmu/max-model-len/-tp from
+    `defaults`) — those reach vLLM at launch, so the parsed view shows
+    them rather than pretending the recipe only has `--foo`."""
     r = RecipeSpec(name="r1", model="m", args={"--foo": "bar"})
     lib.save_recipe(r)
     got = lib.load_recipe("r1")
-    assert got.args == {"--foo": "bar"}
+    assert got.args["--foo"] == "bar"
+    # Template-derived flags surface in the effective view, canonicalized.
+    assert got.args["--host"] == "0.0.0.0"
+    assert got.args["--port"] == "8000"
+    assert got.args["--tensor-parallel-size"] == "1"
 
 
 def test_load_missing_raises(lib):

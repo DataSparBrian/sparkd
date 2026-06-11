@@ -162,24 +162,59 @@ def test_load_extracts_args_from_command_template(lib):
     assert spec.args["--max-model-len"] == "131072"
     assert spec.args["-tp"] == "2"
     assert spec.args["--tool-call-parser"] == "qwen3_coder"
-    # Boolean / no-value flags appear with empty string value
-    assert spec.args["--enable-auto-tool-choice"] == ""
+    # Known boolean flags derive as "true" so validate()'s _is_true and
+    # the form view read them as enabled ("" parses as false and caused
+    # spurious "parser without --enable-auto-tool-choice" warnings).
+    assert spec.args["--enable-auto-tool-choice"] == "true"
 
 
-def test_load_does_not_overwrite_existing_args(lib):
-    """If the YAML already has its own `args:` block (sparkd-native), don't
-    derive from command — respect what's there."""
+def test_load_merges_command_only_flags_into_existing_args(lib):
+    """A recipe whose `args:` drifted from its curated `command:` (the
+    Nemotron-3 case: tool-call flags only in command) must surface the
+    command-only flags in the parsed args view — otherwise the advisor
+    optimizes against a partial config. Existing args win per-key."""
     yaml_text = (
         "name: r\n"
         "model: org/m\n"
+        "defaults:\n"
+        "  tensor_parallel: 2\n"
         "args:\n"
         "  --my-flag: hello\n"
+        "  --port: '9999'\n"
         "command: |\n"
-        "  vllm serve org/m --port 9000\n"
+        "  vllm serve org/m \\\n"
+        "    --port 9000 \\\n"
+        "    --enable-auto-tool-choice \\\n"
+        "    --tool-call-parser qwen3_coder \\\n"
+        "    -tp {tensor_parallel}\n"
     )
     lib.save_recipe_raw("r", yaml_text)
     spec = lib.load_recipe("r")
-    assert spec.args == {"--my-flag": "hello"}
+    # Existing args respected per-key.
+    assert spec.args["--my-flag"] == "hello"
+    assert spec.args["--port"] == "9999"
+    # Command-only flags merged in, short aliases canonicalized.
+    assert spec.args["--tool-call-parser"] == "qwen3_coder"
+    assert spec.args["--enable-auto-tool-choice"] == "true"
+    assert spec.args["--tensor-parallel-size"] == "2"
+    assert "-tp" not in spec.args
+
+
+def test_load_merge_respects_canonical_alias_collisions(lib):
+    """`--tensor-parallel-size` in args and `-tp` in command are the same
+    flag — args wins; no duplicate key in the merged view."""
+    yaml_text = (
+        "name: r2\n"
+        "model: org/m\n"
+        "args:\n"
+        "  --tensor-parallel-size: '4'\n"
+        "command: |\n"
+        "  vllm serve org/m -tp 2\n"
+    )
+    lib.save_recipe_raw("r2", yaml_text)
+    spec = lib.load_recipe("r2")
+    assert spec.args["--tensor-parallel-size"] == "4"
+    assert "-tp" not in spec.args
 
 
 def test_load_recipe_text_prefers_override(lib):

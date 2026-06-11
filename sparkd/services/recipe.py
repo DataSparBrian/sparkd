@@ -6,6 +6,7 @@ from sparkd.db.engine import session_scope
 from sparkd.db.models import Box
 from sparkd.schemas.recipe import RecipeDiff, RecipeSpec
 from sparkd.services.box import BoxService
+from sparkd.services.cli_flags import BOOL_FLAG_ARGS, FLAG_ALIASES
 from sparkd.services.library import LibraryService
 from sparkd.ssh.pool import SSHPool
 
@@ -272,27 +273,10 @@ def _is_true(v: object) -> bool:
     return False
 
 
-# Args whose value is a flag-only boolean — emitting `--trust-remote-code true`
-# breaks vLLM (it reads "true" as a positional). For these, when the recipe's
-# args dict has the value "true"/"True"/"" we emit only the flag.
-_BOOL_FLAG_ARGS = frozenset(
-    {
-        "--trust-remote-code",
-        "--enforce-eager",
-        "--enable-prefix-caching",
-        "--enable-chunked-prefill",
-        "--enable-auto-tool-choice",
-        "--disable-log-stats",
-        "--disable-log-requests",
-    }
-)
-
-
-# Short-form aliases that appear in hand-curated upstream commands.
-_FLAG_ALIASES = {
-    "-tp": "--tensor-parallel-size",
-    "-pp": "--pipeline-parallel-size",
-}
+# Re-exported from cli_flags (shared with services.library, which this
+# module can't import from without a cycle).
+_BOOL_FLAG_ARGS = BOOL_FLAG_ARGS
+_FLAG_ALIASES = FLAG_ALIASES
 
 
 def _parse_command_flags(command: str) -> dict[str, str]:
