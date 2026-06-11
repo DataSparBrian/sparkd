@@ -10,6 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+# Single place to bump when Anthropic ships a new flagship. Used as the
+# adapter default and the legacy /setup route's seed model.
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
+
+
 @dataclass
 class ProviderDef:
     id: str
@@ -28,6 +33,7 @@ PROVIDERS: list[ProviderDef] = [
         label="Anthropic (Claude)",
         family="anthropic",
         models=[
+            DEFAULT_ANTHROPIC_MODEL,
             "claude-opus-4-7",
             "claude-sonnet-4-6",
             "claude-haiku-4-5-20251001",

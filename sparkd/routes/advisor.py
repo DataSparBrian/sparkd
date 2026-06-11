@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from sparkd.advisor.providers import DEFAULT_ANTHROPIC_MODEL
 from sparkd.advisor.providers import PROVIDERS as PROVIDERS_CATALOG
 from sparkd.errors import NotFoundError, ValidationError
 from sparkd.hardware import default_dgx_spark_caps
@@ -239,7 +240,7 @@ def setup(body: SetupBody, request: Request) -> dict:
     cfg = advisor_config.load_config()
     cfg.active_provider = "anthropic"
     if not cfg.get_state("anthropic").model:
-        cfg.get_state("anthropic").model = "claude-opus-4-7"
+        cfg.get_state("anthropic").model = DEFAULT_ANTHROPIC_MODEL
     advisor_config.save_config(cfg)
     request.app.state.advisor.port = advisor_config.build_port(cfg)
     return {"ok": True}
